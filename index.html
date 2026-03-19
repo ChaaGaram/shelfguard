@@ -33,7 +33,143 @@ if ('serviceWorker' in navigator) {
   });
 }
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- ══ FIREBASE REALTIME SYNC ══ -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDfAroxqXL98TJMRIB9z80dQ6AFwXzQLZg",
+  authDomain: "shelfguard-a5028.firebaseapp.com",
+  databaseURL: "https://shelfguard-a5028-default-rtdb.firebaseio.com",
+  projectId: "shelfguard-a5028",
+  storageBucket: "shelfguard-a5028.firebasestorage.app",
+  messagingSenderId: "493389601987",
+  appId: "1:493389601987:web:729d9b7c28903e4d26d676"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const db = getDatabase(fbApp);
+const SKIP_KEYS = ['sg_sync_config','sg_last_backup','sg_fb_writing'];
+
+// ── সব localStorage ডেটা Firebase-এ সেভ ──
+window.fbSave = async function() {
+  const data = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (SKIP_KEYS.includes(k)) continue;
+    try { data[k] = JSON.parse(localStorage.getItem(k)); }
+    catch { data[k] = localStorage.getItem(k); }
+  }
+  try {
+    localStorage.setItem('sg_fb_writing', '1');
+    await set(ref(db, 'shelfguard_data'), data);
+    localStorage.removeItem('sg_fb_writing');
+    window._showFbStatus('☁️ Synced', 'ok');
+    console.log('✅ Firebase save ok');
+  } catch(e) {
+    localStorage.removeItem('sg_fb_writing');
+    window._showFbStatus('❌ Sync failed', 'err');
+    console.warn('Firebase save error:', e);
+  }
+};
+
+// ── Firebase থেকে ডেটা লোড ──
+window.fbLoad = async function() {
+  return new Promise((resolve) => {
+    const unsub = onValue(ref(db, 'shelfguard_data'), (snap) => {
+      unsub(); // একবারই পড়ব
+      if (!snap.exists()) { resolve(false); return; }
+      const data = snap.val();
+      Object.entries(data).forEach(([k,v]) => {
+        if (SKIP_KEYS.includes(k)) return;
+        localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+      });
+      resolve(true);
+    }, () => resolve(false));
+  });
+};
+
+// ── Real-time listener: অন্য ডিভাইস থেকে পরিবর্তন হলে অটো রিফ্রেশ ──
+let fbListenerActive = false;
+window.fbStartListener = function() {
+  if (fbListenerActive) return;
+  fbListenerActive = true;
+  onValue(ref(db, 'shelfguard_data'), (snap) => {
+    if (!snap.exists()) return;
+    if (localStorage.getItem('sg_fb_writing') === '1') return; // নিজের save ignore
+    const data = snap.val();
+    let changed = false;
+    Object.entries(data).forEach(([k,v]) => {
+      if (SKIP_KEYS.includes(k)) return;
+      const newVal = typeof v === 'string' ? v : JSON.stringify(v);
+      if (localStorage.getItem(k) !== newVal) {
+        localStorage.setItem(k, newVal);
+        changed = true;
+      }
+    });
+    if (changed) {
+      window._showFbStatus('🔄 Updated!', 'ok');
+      // পেজ রিলোড না করে UI আপডেট
+      setTimeout(() => { try { renderCurrentPage(); } catch(e) {} }, 200);
+    }
+  });
+};
+
+// ── Status toast ──
+window._showFbStatus = function(msg, type) {
+  let el = document.getElementById('fb-sync-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'fb-sync-toast';
+    el.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:9px 16px;border-radius:12px;font-size:12px;font-weight:700;z-index:9999;transition:all 0.3s;font-family:Nunito,sans-serif;';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.background = type === 'ok' ? 'rgba(52,211,153,0.95)' : type === 'err' ? 'rgba(248,113,113,0.95)' : 'rgba(96,165,250,0.95)';
+  el.style.color = 'white';
+  el.style.opacity = '1';
+  clearTimeout(window._fbToastTimer);
+  window._fbToastTimer = setTimeout(() => { el.style.opacity = '0'; }, 3000);
+};
+
+// ── App শুরুতে Firebase থেকে লোড করো ──
+document.addEventListener('DOMContentLoaded', async () => {
+  window._showFbStatus('⏳ Loading...', 'loading');
+  const loaded = await window.fbLoad();
+  if (loaded) {
+    window._showFbStatus('✅ Data loaded', 'ok');
+  }
+  window.fbStartListener(); // Real-time শুনতে শুরু করো
+});
+
+// ── saveState() এর পর Firebase-এও সেভ হবে ──
+// মূল saveState function কে wrap করি
+document.addEventListener('DOMContentLoaded', () => {
+  const _origSave = window.saveState;
+  if (typeof _origSave === 'function') {
+    window.saveState = function(...args) {
+      _origSave.apply(this, args);
+      window.fbSave();
+    };
+  } else {
+    // saveState পরে define হলে interval দিয়ে ধরি
+    const check = setInterval(() => {
+      if (typeof window.saveState === 'function' && window.saveState !== window._fbWrapped) {
+        window._fbWrapped = window.saveState;
+        const orig = window.saveState;
+        window.saveState = function(...args) {
+          orig.apply(this, args);
+          window.fbSave();
+        };
+        clearInterval(check);
+      }
+    }, 500);
+  }
+});
+</script>
+<!-- ══ END FIREBASE SYNC ══ -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Bengali:wght@400;500;600;700&family=Nunito:wght@400;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
